@@ -20,7 +20,7 @@ import numpy as np
 import pygame
 import moderngl
 
-from fishyview.camera import FOV_START, START_PAN, START_TILT, turn, zoom
+from fishyview.camera import FOV_START, LABELS, basis, start_pose, turn, zoom
 from fishyview.layout import (
     BAR_H,
     ITEM_H,
@@ -90,6 +90,39 @@ def save_recent(paths: list[str]) -> None:
         dest.write_text(json.dumps(paths[:8], indent=2), encoding="utf-8")
     except OSError as exc:
         print(f"Could not save the recent list: {exc}", flush=True)
+
+
+def settings_file() -> Path:
+    return recent_file().parent / "settings.json"
+
+
+def load_settings() -> dict:
+    try:
+        data = json.loads(settings_file().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def orientation_for(path: Path) -> str:
+    saved = load_settings().get("orientation", {})
+    mode = saved.get(str(path)) if isinstance(saved, dict) else None
+    return mode if mode in LABELS else "down"
+
+
+def save_orientation(path: Path, mode: str) -> None:
+    data = load_settings()
+    saved = data.get("orientation")
+    if not isinstance(saved, dict):
+        saved = {}
+    saved[str(path)] = mode
+    data["orientation"] = saved
+    dest = settings_file()
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError as exc:
+        print(f"Could not save the mount: {exc}", flush=True)
 
 
 def choose_video(owner: int) -> str | None:
@@ -284,8 +317,7 @@ void main() {
 FISHEYE_FS = """
 #version 330
 uniform sampler2D u_tex;
-uniform float u_pan;
-uniform float u_tilt;
+uniform mat3 u_cam;
 uniform float u_fov;
 uniform float u_lens;
 uniform float u_aspect;
@@ -295,14 +327,7 @@ void main() {
     vec2 ndc = v_uv * 2.0 - 1.0;
     float half_tan = tan(u_fov * 0.5);
     vec3 cam = normalize(vec3(ndc.x * u_aspect * half_tan, ndc.y * half_tan, 1.0));
-    float sp = sin(u_pan);
-    float cp = cos(u_pan);
-    float st = sin(u_tilt);
-    float ct = cos(u_tilt);
-    vec3 forward = vec3(cp * st, sp * st, ct);
-    vec3 up = vec3(cp * ct, sp * ct, -st);
-    vec3 right = vec3(sp, -cp, 0.0);
-    vec3 dir = right * cam.x + up * cam.y + forward * cam.z;
+    vec3 dir = u_cam * cam;
     if (dir.z <= 0.0) { frag = vec4(0.0, 0.0, 0.0, 1.0); return; }
     float theta = atan(length(dir.xy), dir.z);
     if (theta > u_lens) { frag = vec4(0.0, 0.0, 0.0, 1.0); return; }
@@ -345,8 +370,8 @@ class FishyView:
     def __init__(self, path: Path | None):
         self.path = path
         self.decoder: Decoder | None = None
-        self.pan = START_PAN
-        self.tilt = START_TILT
+        self.mount = orientation_for(path) if path is not None else "down"
+        self.pan, self.tilt = start_pose(self.mount)
         self.fov = FOV_START
         self.clock = 0.0
         self.playing = path is not None
@@ -488,7 +513,7 @@ class FishyView:
         if keys[pygame.K_DOWN]:
             dy += speed * elapsed
         if dx or dy:
-            self.pan, self.tilt = turn(self.pan, self.tilt, dx, dy)
+            self.pan, self.tilt = turn(self.mount, self.pan, self.tilt, dx, dy)
 
     def _press(self, button: int, pos: tuple[int, int]) -> None:
         x, y = pos
@@ -532,7 +557,7 @@ class FishyView:
             dx = pos[0] - self._last[0]
             dy = pos[1] - self._last[1]
             self._last = pos
-            self.pan, self.tilt = turn(self.pan, self.tilt, dx, dy)
+            self.pan, self.tilt = turn(self.mount, self.pan, self.tilt, dx, dy)
         elif self._dragging == "seek":
             width, height = pygame.display.get_window_size()
             self._seek_at(pos[0], transport(width, height)["seek"])
@@ -582,7 +607,7 @@ class FishyView:
             label = "Pause" if self.playing else "Play"
             return [(label, "toggle"), ("Back 5 seconds", "back"), ("Forward 5 seconds", "forward")]
         if name == "View":
-            return [("Reset view", "reset"), ("Zoom in", "zin"), ("Zoom out", "zout")]
+            return [("Reset view", "reset"), ("Zoom in", "zin"), ("Zoom out", "zout"), (None, None), *self._mount_rows()]
         return [("How to look around", "help")]
 
     def _open_named_menu(self, name: str) -> None:
@@ -598,6 +623,8 @@ class FishyView:
             ("Pause" if self.playing else "Play", "toggle"),
             ("Open…", "open"),
             ("Reset view", "reset"),
+            (None, None),
+            *self._mount_rows(),
         ]
         width = self._menu_width(self.menu_items)
         window = pygame.display.get_window_size()
@@ -631,12 +658,17 @@ class FishyView:
             self.fov = zoom(self.fov, -1)
         elif action == "help":
             alert(
-                "Drag to look around.\n"
-                "Left and right turn around the camera. Up and down move from the center of the lens out to the edge.\n"
+                "Drag to look around. Left and right turn. Up and down look up and down.\n"
                 "Hold an arrow key to keep moving. Shift is faster.\n"
-                "The wheel zooms. Space plays and pauses.\n"
-                "Ctrl+O opens a video."
+                "The wheel zooms. Space plays and pauses. Ctrl+O opens a video.\n\n"
+                "View sets how the camera is mounted.\n"
+                "Looking down: the center of the picture is the ground.\n"
+                "Looking out: the center is straight ahead, and the top of the picture is up.\n"
+                "Looking up: the center is the sky.\n"
+                "That choice is remembered for each file."
             )
+        elif isinstance(action, tuple) and action[0] == "mount":
+            self._set_mount(str(action[1]))
         elif isinstance(action, tuple) and action[0] == "recent":
             self.open_path(Path(action[1]))
 
@@ -663,6 +695,8 @@ class FishyView:
         self.audio_ready = False
         self._music = False
         threading.Thread(target=self._load_audio, args=(path,), daemon=True).start()
+        self.mount = orientation_for(path)
+        self.pan, self.tilt = start_pose(self.mount)
         self._remember(path)
 
     def _remember(self, path: Path) -> None:
@@ -671,9 +705,23 @@ class FishyView:
         self.recent = self.recent[:8]
         save_recent(self.recent)
 
+    def _mount_rows(self) -> list[tuple[str, tuple[str, str]]]:
+        rows = []
+        for mode, label in LABELS.items():
+            prefix = "✓  " if self.mount == mode else ""
+            rows.append((prefix + label, ("mount", mode)))
+        return rows
+
+    def _set_mount(self, mode: str) -> None:
+        if mode not in LABELS:
+            return
+        self.mount = mode
+        self.pan, self.tilt = start_pose(mode)
+        if self.path is not None:
+            save_orientation(self.path, mode)
+
     def _reset_view(self) -> None:
-        self.pan = START_PAN
-        self.tilt = START_TILT
+        self.pan, self.tilt = start_pose(self.mount)
         self.fov = FOV_START
 
     def _seek_at(self, x: float, rect: tuple[float, float, float, float]) -> None:
@@ -818,8 +866,7 @@ class FishyView:
         if self.texture is not None:
             self.texture.use(0)
             self.fisheye["u_tex"].value = 0
-            self.fisheye["u_pan"].value = self.pan
-            self.fisheye["u_tilt"].value = self.tilt
+            self.fisheye["u_cam"].value = basis(self.mount, self.pan, self.tilt)
             self.fisheye["u_fov"].value = self.fov
             self.fisheye["u_lens"].value = np.pi / 2
             self.fisheye["u_aspect"].value = width / max(1, height)
@@ -875,6 +922,9 @@ class FishyView:
         duration = self.decoder.duration if self.decoder else 0
         label = f"{fmt(self.clock)} / {fmt(duration)}"
         self._text(label, play[0] + play[2] + 14, play[1] + 12, self.font)
+        mount = LABELS[self.mount]
+        mount_w = self.font.size(mount)[0]
+        self._text(mount, width - mount_w - 22, play[1] + 12, self.font)
         seek = boxes["seek"]
         fraction = 0.0 if duration <= 0 else min(1.0, max(0.0, self.clock / duration))
         self._fill(seek[0], seek[1] + 6, seek[2], 4, (255, 255, 255, 60))
