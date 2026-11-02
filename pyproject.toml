@@ -1,0 +1,17 @@
+[project]
+name = "fishyview"
+version = "0.1.0"
+description = "Player for downward-looking fisheye video"
+requires-python = ">=3.11"
+dependencies = [
+  "av>=14",
+  "moderngl>=5.12",
+  "numpy",
+  "pygame>=2.6",
+]
+
+[project.scripts]
+fishyview = "fishyview.player:main"
+
+[tool.pyinstaller]
+# Built with build.ps1. PyInstaller is a dev tool, not a runtime dependency.
