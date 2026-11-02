@@ -1,6 +1,6 @@
 # FishyView
 
-Personal Windows player for raw downward-looking circular fisheye video, including UniFi G6 exports. Not a commercial product: no accounts, no network, no analytics, no installer service.
+Personal Windows player for raw circular fisheye video, including UniFi G6 exports. MIT licensed. No accounts, no network, no analytics, no installer service.
 
 ## Stack
 

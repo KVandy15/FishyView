@@ -1,8 +1,11 @@
 [project]
 name = "fishyview"
 version = "0.1.0"
-description = "Player for downward-looking fisheye video"
+description = "Player for circular fisheye video"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
+authors = [{ name = "Korey Vandewalker" }]
 dependencies = [
   "av>=14",
   "moderngl>=5.12",
